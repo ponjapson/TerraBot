@@ -4,6 +4,7 @@ import json
 import difflib
 import os
 import logging
+import random
 from openai import OpenAI
 
 # Configure logging
@@ -51,11 +52,33 @@ def find_best_match(user_input, dataset):
         logging.error("Error processing dataset. Check JSON structure.")
     return None  # No close match found
 
+# List of keywords related to land topics
+LAND_KEYWORDS = [
+"land","surveyor","processor", "survey","teritory", "boundary", "ownership", "property", "real estate", "acessor", 
+"deed of sale", "Title Deed", "zoning", "processing", "parcel", "lot", "terrain", "geodetic", "land title transfer", 
+"topography", "coordinates", "GIS", "easement", "tenure", "leasehold", "freehold",  
+"subdivision", "appraisal", "mortgage", "escrow", "cadastral", "geospatial", "dispute", 
+"land use", "notary", "affidavit", "forestry", "conservation",  
+"survey marker", "land grant", "land registry", "demarcation", "surveying instruments",  
+"mapping", "cartography", "site development", "land reclamation", "environmental impact",  
+"hydrography", "title insurance", "heritage land",  
+"right of way", "geological survey", "land tenure system", "land valuation",  
+"site planning", "land tenure security", "property assessment", "legal description",  
+"land act", "urban planning", "rural land", "municipal planning", "land ownership transfer",  
+"taxation of land", "land development", "land acquisition", "land leasing", "survey regulations",
+"electronic certificate authorizing registration", "deed of donation", "deed of adjudication", "real property tax ",
+"capital gains tax", "documentary stamp tax", "transfer tax", "estate tax", "special assessment tax", "zonal valuation"
+]
+
+def is_land_related(question):
+    """Check if the user's question is related to land topics."""
+    return any(keyword in question.lower() for keyword in LAND_KEYWORDS)
+
 # Fetch response from OpenAI
 def get_openai_response(user_message):
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="ft:gpt-4o-mini-2024-07-18:trmh::B71YEiAQ",
             messages=[{"role": "user", "content": user_message}]
         )
         return response.choices[0].message.content.strip()
@@ -75,10 +98,19 @@ def chat():
     dataset = load_data()
     response = find_best_match(user_message, dataset)
 
-    if response is None:
-        response = get_openai_response(user_message)
+    if response is None:  # If no relevant response is found
+        if is_land_related(user_message):
+            response = get_openai_response(user_message)  # Get AI-generated response for land topics
+        else:
+            response_options = [
+                "I specialize in land-related topics such as surveying, zoning, and property ownership.",
+                "Would you like help with land surveying, title registration, or property laws?",
+                "I'm designed for land-related inquiries. Let me know if you need assistance with those topics!"
+            ]
+            response = random.choice(response_options)  # Randomly select a fallback response
 
     return jsonify({"response": response})
+
 
 if __name__ == "__main__":
     app.run(debug=True)
