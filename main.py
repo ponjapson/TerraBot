@@ -1,78 +1,101 @@
+import random
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import json
-import difflib
 import os
+import json
 import logging
-import random
+import difflib
+import PyPDF2
+import requests
+import firebase_admin
+from firebase_admin import credentials, firestore
 from openai import OpenAI
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
+# Initialize Flask app
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Load OpenAI API Key from environment variable
+# Load OpenAI API Key
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("OPENAI_API_KEY environment variable is not set.")
 
 client = OpenAI(api_key=api_key)
 
-# Path to dataset
-DATA_FILE = "datasets/trmhdataset.jsonl"
+# Initialize Firebase Admin SDK
+cred_path = os.getenv("FIREBASE_CREDENTIALS")
+if not cred_path:
+    raise ValueError("FIREBASE_CREDENTIALS environment variable is not set or incorrect.")
+
+cred = credentials.Certificate(cred_path)
+firebase_admin.initialize_app(cred)
+db = firestore.client()
 
 # Load dataset function
 def load_data():
-    conversations = []
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as file:
-            conversations = [json.loads(line) for line in file]
-        logging.info(f"Loaded {len(conversations)} conversations.")
-    except FileNotFoundError:
-        logging.error("Dataset file not found.")
-    except json.JSONDecodeError:
-        logging.error("Error decoding JSON in dataset.")
-    return conversations
+        with open("datasets/trmhdataset.jsonl", "r", encoding="utf-8") as file:
+            return [json.loads(line) for line in file]
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logging.error(f"Error loading dataset: {e}")
+        return []
 
-# Find best match from dataset
+# Find best dataset match
 def find_best_match(user_input, dataset):
+    user_messages = [conv["messages"][-2]["content"] for conv in dataset if len(conv["messages"]) >= 2]
+    closest_match = difflib.get_close_matches(user_input, user_messages, n=1, cutoff=0.7)
+    
+    if closest_match:
+        for conv in dataset:
+            if conv["messages"][-2]["content"] == closest_match[0]:
+                return conv["messages"][-1]["content"]
+    return None
+
+# Extract text from a PDF URL
+def extract_text_from_pdf_url(pdf_url):
+    text = ""
     try:
-        user_messages = [
-            conv["messages"][-2]["content"] for conv in dataset if len(conv["messages"]) >= 2
-        ]
-        closest_match = difflib.get_close_matches(user_input, user_messages, n=1, cutoff=0.7)
+        response = requests.get(pdf_url)
+        if response.status_code == 200:
+            with open("temp.pdf", "wb") as file:
+                file.write(response.content)
+            
+            with open("temp.pdf", "rb") as file:
+                reader = PyPDF2.PdfReader(file)
+                for page in reader.pages:
+                    extracted_text = page.extract_text()
+                    if extracted_text:
+                        text += extracted_text + "\n"
+    except Exception as e:
+        logging.error(f"Error extracting text from PDF URL {pdf_url}: {e}")
+    return text.strip()
 
-        if closest_match:
-            for conv in dataset:
-                if conv["messages"][-2]["content"] == closest_match[0]:
-                    return conv["messages"][-1]["content"]
-    except KeyError:
-        logging.error("Error processing dataset. Check JSON structure.")
-    return None  # No close match found
+# Get all PDF texts from Firebase Firestore
+def fetch_pdfs_from_firebase():
+    pdf_texts = []
+    try:
+        pdf_docs = db.collection("pdfs").stream()
+        for doc in pdf_docs:
+            pdf_url = doc.to_dict().get("url")
+            if pdf_url:
+                text = extract_text_from_pdf_url(pdf_url)
+                if text:
+                    pdf_texts.append({"filename": doc.id, "content": text})
+    except Exception as e:
+        logging.error(f"Error fetching PDFs from Firebase: {e}")
+    return pdf_texts
 
-# List of keywords related to land topics
-LAND_KEYWORDS = [
-"land","surveyor","processor", "survey","teritory", "boundary", "ownership", "property", "real estate", "acessor", 
-"deed of sale", "Title Deed", "zoning", "processing", "parcel", "lot", "terrain", "geodetic", "land title transfer", 
-"topography", "coordinates", "GIS", "easement", "tenure", "leasehold", "freehold",  
-"subdivision", "appraisal", "mortgage", "escrow", "cadastral", "geospatial", "dispute", 
-"land use", "notary", "affidavit", "forestry", "conservation",  
-"survey marker", "land grant", "land registry", "demarcation", "surveying instruments",  
-"mapping", "cartography", "site development", "land reclamation", "environmental impact",  
-"hydrography", "title insurance", "heritage land",  
-"right of way", "geological survey", "land tenure system", "land valuation",  
-"site planning", "land tenure security", "property assessment", "legal description",  
-"land act", "urban planning", "rural land", "municipal planning", "land ownership transfer",  
-"taxation of land", "land development", "land acquisition", "land leasing", "survey regulations",
-"electronic certificate authorizing registration", "deed of donation", "deed of adjudication", "real property tax ",
-"capital gains tax", "documentary stamp tax", "transfer tax", "estate tax", "special assessment tax", "zonal valuation"
-]
-
-def is_land_related(question):
-    """Check if the user's question is related to land topics."""
-    return any(keyword in question.lower() for keyword in LAND_KEYWORDS)
+# Search PDFs for relevant text
+def search_pdfs(user_question):
+    pdf_data = fetch_pdfs_from_firebase()
+    for pdf in pdf_data:
+        matches = difflib.get_close_matches(user_question, pdf["content"].split("\n"), n=1, cutoff=0.6)
+        if matches:
+            return matches[0][:500]
+    return None
 
 # Fetch response from OpenAI
 def get_openai_response(user_message):
@@ -85,32 +108,81 @@ def get_openai_response(user_message):
     except Exception as e:
         logging.error(f"OpenAI API Error: {str(e)}")
         return "Sorry, I'm experiencing issues connecting to OpenAI."
+    
+# LAND KEYWORDS
+LAND_KEYWORDS = [
+    "land", "property", "real estate", "plot", "survey number", "patta",
+    "site", "acre", "hectare", "land record", "fmb", "boundary", "encroachment",
+    "revenue map", "landowner", "ownership", "mutation", "land tax"
+]
+
+def is_land_related(message):
+    message_lower = message.lower()
+    return any(word in message_lower for word in LAND_KEYWORDS)
 
 # Chat route
 @app.route("/chat", methods=["POST"])
 def chat():
-    user_data = request.get_json()
-    user_message = user_data.get("message", "").strip()
+    try:
+        user_data = request.get_json()
+        user_message = user_data.get("message", "").strip()
 
-    if not user_message:
-        return jsonify({"error": "Message cannot be empty."}), 400
+        if not user_message:
+            return jsonify({"text": "Error: Message cannot be empty."}), 400
+        
+        greeting_keywords = ["hello", "hi", "hey", "good morning", "good evening", "howdy"]
+        if any(greeting in user_message.lower() for greeting in greeting_keywords):
+            return jsonify({"text": "Hello, I'm TerraBot. How can I assist you today?"})
+        
+        appreciation_keywords = ["thank you", "thanks", "much appreciated", "grateful", "thankful", "cheers"]
+        appreciation_responses = [
+                                 "You're welcome!",
+                                 "Happy to help!",
+                                 "Anytime!",
+                                 "Glad I could assist you.",
+                                 "You're most welcome!",
+                                 "No problem at all!"
+                                 ]
+        
+        if any(phrase in user_message.lower() for phrase in appreciation_keywords):
+            return jsonify({"text": random.choice(appreciation_responses)})
+        
+        closing_keywords = ["goodbye", "see you later", "bye", "cyl"]
+        if any(phrase in user_message.lower() for phrase in closing_keywords):
+           closing_responses = [
+                                 "Goodbye! Have a great day!",
+                                 "See you later! Reach out if you need land help.",
+                                 "Take care! Let me know if you have more land-related questions.",
+                                 "Bye! I'm here whenever you need land info.",
+                                 "You're most welcome!",
+                                 "Farewell! Happy to assist anytime"
+                                 ]
+           
+        if any(phrase in user_message.lower() for phrase in closing_keywords):
+            return jsonify({"text": random.choice(closing_responses)})
+        
+        # First, check if the message is related to land
+        if not is_land_related(user_message):
+            return jsonify({"text": "Sorry, this question is not related to land or property. I can only help with land-related queries."}), 403
+        
 
-    dataset = load_data()
-    response = find_best_match(user_message, dataset)
+        # If land-related, check Dataset First
+        dataset = load_data()
+        response = find_best_match(user_message, dataset)
 
-    if response is None:  # If no relevant response is found
-        if is_land_related(user_message):
-            response = get_openai_response(user_message)  # Get AI-generated response for land topics
-        else:
-            response_options = [
-                "I specialize in land-related topics such as surveying, zoning, and property ownership.",
-                "Would you like help with land surveying, title registration, or property laws?",
-                "I'm designed for land-related inquiries. Let me know if you need assistance with those topics!"
-            ]
-            response = random.choice(response_options)  # Randomly select a fallback response
+        # If No Dataset Answer, Search PDFs
+        if response is None:
+            response = search_pdfs(user_message)  
 
-    return jsonify({"response": response})
+        # If No PDF Match, Use OpenAI
+        if response is None:
+            response = get_openai_response(user_message)  
 
+        return jsonify({"text": response})
+
+    except Exception as e:
+        logging.error(f"Unexpected server error: {str(e)}")
+        return jsonify({"text": "An unexpected error occurred."}), 500  
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True) 
