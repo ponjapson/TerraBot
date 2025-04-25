@@ -1,6 +1,15 @@
 {
-   "rewrites":[
-    {"sources":"/(.*)","destination":"/"}
-  ]
-}
+    "builds": [
+      {
+        "src": "main.py",
+        "use": "@vercel/python"
+      }
+    ],
+    "routes": [
+      {
+        "src": "/chat",
+        "dest": "main.py"
+      }
+    ]
+  }
   
