@@ -107,9 +107,20 @@ def get_openai_response(user_message):
 
 # LAND KEYWORDS
 LAND_KEYWORDS = [
-    "land", "property", "real estate", "plot", "survey number", "patta",
-    "site", "acre", "hectare", "land record", "fmb", "boundary", "encroachment",
-    "revenue map", "landowner", "ownership", "mutation", "land tax", "tax dec", "land surveyor", "land processor"
+    "land","surveyor","processor", "survey","teritory", "boundary", "ownership", "property", "real estate", "acessor", 
+    "deed of sale", "Title Deed", "zoning", "processing", "parcel", "lot", "terrain", "geodetic", "land title transfer", 
+    "topography", "coordinates", "GIS", "easement", "tenure", "leasehold", "freehold",  
+    "subdivision", "appraisal", "mortgage", "escrow", "cadastral", "geospatial", "dispute", 
+    "land use", "notary", "affidavit", "forestry", "conservation",  
+    "survey marker", "land grant", "land registry", "demarcation", "surveying instruments",  
+    "mapping", "cartography", "site development", "land reclamation", "environmental impact",  
+    "hydrography", "title insurance", "heritage land",  
+    "right of way", "geological survey", "land tenure system", "land valuation",  
+    "site planning", "land tenure security", "property assessment", "legal description",  
+    "land act", "urban planning", "rural land", "municipal planning", "land ownership transfer",  
+    "taxation of land", "land development", "land acquisition", "land leasing", "survey regulations",
+    "electronic certificate authorizing registration", "deed of donation", "deed of adjudication", "real property tax ",
+    "capital gains tax", "documentary stamp tax", "transfer tax", "estate tax", "special assessment tax", "zonal valuation"
 ]
 
 def is_land_related(message):
@@ -191,5 +202,6 @@ def chat():
         return jsonify({"text": "An unexpected error occurred."}), 500
 
 handler = app
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(debug=True)
