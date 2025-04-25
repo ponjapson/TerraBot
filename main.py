@@ -1,7 +1,6 @@
 import random
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import os
 import json
 import logging
 import difflib
@@ -18,18 +17,11 @@ logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Load OpenAI API Key
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    raise ValueError("OPENAI_API_KEY environment variable is not set.")
-
-client = OpenAI(api_key=api_key)
-
-# Initialize Firebase Admin SDK
-cred_path = os.getenv("FIREBASE_CREDENTIALS")
-if not cred_path:
-    raise ValueError("FIREBASE_CREDENTIALS environment variable is not set or incorrect.")
-
+client = OpenAI(
+    api_key="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"
+)
+# Hardcoded Firebase Admin credentials
+cred_path = "terramaster-6f801-firebase-adminsdk-5cl3a-ee5a7e5fc6.json"
 cred = credentials.Certificate(cred_path)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
@@ -100,20 +92,24 @@ def search_pdfs(user_question):
 # Fetch response from OpenAI
 def get_openai_response(user_message):
     try:
+        # Get the response from OpenAI
         response = client.chat.completions.create(
-            model="ft:gpt-4o-mini-2024-07-18:trmh::B71YEiAQ",
+            model="ft:gpt-4o-mini-2024-07-18:trmh::BM9AR4FW",
             messages=[{"role": "user", "content": user_message}]
         )
+        
+        # Access the content of the response and return it
         return response.choices[0].message.content.strip()
-    except Exception as e:
-        logging.error(f"OpenAI API Error: {str(e)}")
-        return "Sorry, I'm experiencing issues connecting to OpenAI."
     
+    except Exception as e:
+        logging.error(f"OpenAI API Error: {e}", exc_info=True)  # Logs the error with traceback
+        return "Sorry, I'm experiencing issues connecting to OpenAI."
+
 # LAND KEYWORDS
 LAND_KEYWORDS = [
     "land", "property", "real estate", "plot", "survey number", "patta",
     "site", "acre", "hectare", "land record", "fmb", "boundary", "encroachment",
-    "revenue map", "landowner", "ownership", "mutation", "land tax"
+    "revenue map", "landowner", "ownership", "mutation", "land tax", "tax dec", "land surveyor", "land processor"
 ]
 
 def is_land_related(message):
@@ -146,10 +142,10 @@ def chat():
         
         if any(phrase in user_message.lower() for phrase in appreciation_keywords):
             return jsonify({"text": random.choice(appreciation_responses)})
-        
+
         closing_keywords = ["goodbye", "see you later", "bye", "cyl"]
         if any(phrase in user_message.lower() for phrase in closing_keywords):
-           closing_responses = [
+            closing_responses = [
                                  "Goodbye! Have a great day!",
                                  "See you later! Reach out if you need land help.",
                                  "Take care! Let me know if you have more land-related questions.",
@@ -157,14 +153,24 @@ def chat():
                                  "You're most welcome!",
                                  "Farewell! Happy to assist anytime"
                                  ]
-           
-        if any(phrase in user_message.lower() for phrase in closing_keywords):
+            
             return jsonify({"text": random.choice(closing_responses)})
         
+        incorrect_keywords = ["wrong", "incorrect", "mistake", "not right", "error", "that's wrong", "that's not correct"]
+        if any(incorrect in user_message.lower() for incorrect in incorrect_keywords):
+             apology_responses = [
+                                "I apologize for the mistake. Let me correct that for you.",
+                                "Sorry about that! Let me try again.",
+                                "My apologies for the error! How can I help you further?",
+                                "Oops! I made a mistake. Please allow me to fix it.",
+                                "Sorry for the confusion! I'll do my best to correct it.",
+                                "I’m sorry, I didn’t get that right. Let me assist you properly."
+]
+             return jsonify({"text": random.choice(apology_responses)})
+
         # First, check if the message is related to land
         if not is_land_related(user_message):
             return jsonify({"text": "Sorry, this question is not related to land or property. I can only help with land-related queries."}), 403
-        
 
         # If land-related, check Dataset First
         dataset = load_data()
@@ -172,17 +178,17 @@ def chat():
 
         # If No Dataset Answer, Search PDFs
         if response is None:
-            response = search_pdfs(user_message)  
+            response = search_pdfs(user_message)
 
         # If No PDF Match, Use OpenAI
         if response is None:
-            response = get_openai_response(user_message)  
+            response = get_openai_response(user_message)
 
         return jsonify({"text": response})
 
     except Exception as e:
         logging.error(f"Unexpected server error: {str(e)}")
-        return jsonify({"text": "An unexpected error occurred."}), 500  
+        return jsonify({"text": "An unexpected error occurred."}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True) 
+    app.run(host="0.0.0.0", port=5000, debug=True)
