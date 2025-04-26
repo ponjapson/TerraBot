@@ -1,6 +1,4 @@
 import random
-from flask import Flask, request, jsonify
-from flask_cors import CORS
 import json
 import logging
 import difflib
@@ -13,18 +11,16 @@ from openai import OpenAI
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
-# Initialize Flask app
-app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
-
-client = OpenAI(
-    api_key="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"
-)
-# Hardcoded Firebase Admin credentials
+# Initialize Firebase app (only once)
 cred_path = "terramaster-6f801-firebase-adminsdk-5cl3a-ee5a7e5fc6.json"
 cred = credentials.Certificate(cred_path)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
+
+# Initialize OpenAI client
+client = OpenAI(
+    api_key="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"
+)
 
 # Load dataset function
 def load_data():
@@ -46,16 +42,16 @@ def find_best_match(user_input, dataset):
                 return conv["messages"][-1]["content"]
     return None
 
-# Extract text from a PDF URL
+# Extract text from PDF
 def extract_text_from_pdf_url(pdf_url):
     text = ""
     try:
         response = requests.get(pdf_url)
         if response.status_code == 200:
-            with open("temp.pdf", "wb") as file:
+            with open("/tmp/temp.pdf", "wb") as file:  # for serverless: use /tmp directory
                 file.write(response.content)
             
-            with open("temp.pdf", "rb") as file:
+            with open("/tmp/temp.pdf", "rb") as file:
                 reader = PyPDF2.PdfReader(file)
                 for page in reader.pages:
                     extracted_text = page.extract_text()
@@ -65,7 +61,7 @@ def extract_text_from_pdf_url(pdf_url):
         logging.error(f"Error extracting text from PDF URL {pdf_url}: {e}")
     return text.strip()
 
-# Get all PDF texts from Firebase Firestore
+# Get all PDF texts
 def fetch_pdfs_from_firebase():
     pdf_texts = []
     try:
@@ -92,17 +88,13 @@ def search_pdfs(user_question):
 # Fetch response from OpenAI
 def get_openai_response(user_message):
     try:
-        # Get the response from OpenAI
         response = client.chat.completions.create(
             model="ft:gpt-4o-mini-2024-07-18:trmh::BM9AR4FW",
             messages=[{"role": "user", "content": user_message}]
         )
-        
-        # Access the content of the response and return it
         return response.choices[0].message.content.strip()
-    
     except Exception as e:
-        logging.error(f"OpenAI API Error: {e}", exc_info=True)  # Logs the error with traceback
+        logging.error(f"OpenAI API Error: {e}", exc_info=True)
         return "Sorry, I'm experiencing issues connecting to OpenAI."
 
 # LAND KEYWORDS
@@ -127,81 +119,66 @@ def is_land_related(message):
     message_lower = message.lower()
     return any(word in message_lower for word in LAND_KEYWORDS)
 
-# Chat route
-@app.route("/chat", methods=["POST"])
-def chat():
+# Serverless handler
+def handler(request):
+    if request.method != "POST":
+        return {"statusCode": 405, "body": json.dumps({"text": "Method Not Allowed"})}
+    
     try:
-        user_data = request.get_json()
-        user_message = user_data.get("message", "").strip()
+        body = request.json()
+        user_message = body.get("message", "").strip()
 
         if not user_message:
-            return jsonify({"text": "Error: Message cannot be empty."}), 400
-        
+            return {"statusCode": 400, "body": json.dumps({"text": "Error: Message cannot be empty."})}
+
         greeting_keywords = ["hello", "hi", "hey", "good morning", "good evening", "howdy"]
-        if any(greeting in user_message.lower() for greeting in greeting_keywords):
-            return jsonify({"text": "Hello, I'm TerraBot. How can I assist you today?"})
-        
         appreciation_keywords = ["thank you", "thanks", "much appreciated", "grateful", "thankful", "cheers"]
-        appreciation_responses = [
-                                 "You're welcome!",
-                                 "Happy to help!",
-                                 "Anytime!",
-                                 "Glad I could assist you.",
-                                 "You're most welcome!",
-                                 "No problem at all!"
-                                 ]
-        
-        if any(phrase in user_message.lower() for phrase in appreciation_keywords):
-            return jsonify({"text": random.choice(appreciation_responses)})
-
         closing_keywords = ["goodbye", "see you later", "bye", "cyl"]
-        if any(phrase in user_message.lower() for phrase in closing_keywords):
-            closing_responses = [
-                                 "Goodbye! Have a great day!",
-                                 "See you later! Reach out if you need land help.",
-                                 "Take care! Let me know if you have more land-related questions.",
-                                 "Bye! I'm here whenever you need land info.",
-                                 "You're most welcome!",
-                                 "Farewell! Happy to assist anytime"
-                                 ]
-            
-            return jsonify({"text": random.choice(closing_responses)})
-        
         incorrect_keywords = ["wrong", "incorrect", "mistake", "not right", "error", "that's wrong", "that's not correct"]
+
+        if any(greet in user_message.lower() for greet in greeting_keywords):
+            return {"statusCode": 200, "body": json.dumps({"text": "Hello, I'm TerraBot. How can I assist you today?"})}
+
+        if any(appreciate in user_message.lower() for appreciate in appreciation_keywords):
+            appreciation_responses = [
+                "You're welcome!", "Happy to help!", "Anytime!", 
+                "Glad I could assist you.", "You're most welcome!", "No problem at all!"
+            ]
+            return {"statusCode": 200, "body": json.dumps({"text": random.choice(appreciation_responses)})}
+
+        if any(close in user_message.lower() for close in closing_keywords):
+            closing_responses = [
+                "Goodbye! Have a great day!", "See you later! Reach out if you need land help.",
+                "Take care! Let me know if you have more land-related questions.",
+                "Bye! I'm here whenever you need land info.", "Farewell! Happy to assist anytime"
+            ]
+            return {"statusCode": 200, "body": json.dumps({"text": random.choice(closing_responses)})}
+
         if any(incorrect in user_message.lower() for incorrect in incorrect_keywords):
-             apology_responses = [
-                                "I apologize for the mistake. Let me correct that for you.",
-                                "Sorry about that! Let me try again.",
-                                "My apologies for the error! How can I help you further?",
-                                "Oops! I made a mistake. Please allow me to fix it.",
-                                "Sorry for the confusion! I'll do my best to correct it.",
-                                "I’m sorry, I didn’t get that right. Let me assist you properly."
-]
-             return jsonify({"text": random.choice(apology_responses)})
+            apology_responses = [
+                "I apologize for the mistake. Let me correct that for you.",
+                "Sorry about that! Let me try again.",
+                "My apologies for the error! How can I help you further?",
+                "Oops! I made a mistake. Please allow me to fix it.",
+                "Sorry for the confusion! I'll do my best to correct it.",
+                "I’m sorry, I didn’t get that right. Let me assist you properly."
+            ]
+            return {"statusCode": 200, "body": json.dumps({"text": random.choice(apology_responses)})}
 
-        # First, check if the message is related to land
         if not is_land_related(user_message):
-            return jsonify({"text": "Sorry, this question is not related to land or property. I can only help with land-related queries."}), 403
+            return {"statusCode": 403, "body": json.dumps({"text": "Sorry, this question is not related to land or property. I can only help with land-related queries."})}
 
-        # If land-related, check Dataset First
         dataset = load_data()
         response = find_best_match(user_message, dataset)
 
-        # If No Dataset Answer, Search PDFs
         if response is None:
             response = search_pdfs(user_message)
 
-        # If No PDF Match, Use OpenAI
         if response is None:
             response = get_openai_response(user_message)
 
-        return jsonify({"text": response})
+        return {"statusCode": 200, "body": json.dumps({"text": response})}
 
     except Exception as e:
         logging.error(f"Unexpected server error: {str(e)}")
-        return jsonify({"text": "An unexpected error occurred."}), 500
-
-handler = app
-
-if __name__ == "__main__":
-    app.run(debug=True)
+        return {"statusCode": 500, "body": json.dumps({"text": "An unexpected error occurred."})}
