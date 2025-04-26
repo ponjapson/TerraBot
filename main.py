@@ -204,6 +204,8 @@ def chat():
     except Exception as e:
         logging.error(f"Unexpected server error: {str(e)}")
         return jsonify({"text": "An unexpected error occurred."}), 500
+    
+handler = app
 
 if __name__ == "__main__":
     app.run(debug=True)
