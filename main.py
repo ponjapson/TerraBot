@@ -10,6 +10,7 @@ import os
 import firebase_admin
 from firebase_admin import credentials, firestore
 from openai import OpenAI
+from http.server import BaseHTTPRequestHandler
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -21,6 +22,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"]
 )
+
 # Hardcoded Firebase Admin credentials
 firebase_cred_json = os.environ.get("FIREBASE_CRED_JSON")
 if firebase_cred_json:
@@ -111,7 +113,7 @@ def get_openai_response(user_message):
 
 # LAND KEYWORDS
 LAND_KEYWORDS = [
-    "land","surveyor","processor", "survey","teritory", "boundary", "ownership", "property", "real estate", "acessor", 
+    "land", "surveyor", "processor", "survey", "territory", "boundary", "ownership", "property", "real estate", "accessor", 
     "deed of sale", "Title Deed", "zoning", "processing", "parcel", "lot", "terrain", "geodetic", "land title transfer", 
     "topography", "coordinates", "GIS", "easement", "tenure", "leasehold", "freehold",  
     "subdivision", "appraisal", "mortgage", "escrow", "cadastral", "geospatial", "dispute", 
@@ -202,10 +204,12 @@ def chat():
         return jsonify({"text": response})
 
     except Exception as e:
-        logging.error(f"Unexpected server error: {str(e)}")
+        logging.error(f"Unexpected server error: {str(e)}", exc_info=True)
         return jsonify({"text": "An unexpected error occurred."}), 500
     
-handler = app
+# Lambda handler for AWS or other serverless deployments
+def handler(event, context):
+    return app(event, context)
 
 if __name__ == "__main__":
     app.run(debug=True)
