@@ -6,6 +6,7 @@ import logging
 import difflib
 import PyPDF2
 import requests
+import os
 import firebase_admin
 from firebase_admin import credentials, firestore
 from openai import OpenAI
@@ -18,13 +19,16 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 client = OpenAI(
-    api_key="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"
+    api_key=os.environ["OPENAI_API_KEY"]
 )
 # Hardcoded Firebase Admin credentials
-cred_path = "terramaster-6f801-firebase-adminsdk-5cl3a-ee5a7e5fc6.json"
-cred = credentials.Certificate(cred_path)
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+firebase_cred_json = os.environ.get("FIREBASE_CRED_JSON")
+if firebase_cred_json:
+    cred = credentials.Certificate(json.loads(firebase_cred_json))
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+else:
+    raise Exception("Firebase credentials not found.")
 
 # Load dataset function
 def load_data():
