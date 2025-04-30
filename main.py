@@ -11,9 +11,9 @@ import io
 from dotenv import load_dotenv
 import openai
 from langdetect import detect, LangDetectException
-from googletrans import Translator
+from deep_translator import GoogleTranslator
+import nltk.data
 from land_keywords import is_land_related_english, is_land_related_bisaya
-from deep_translator import GoogleTranslator  # Import deep_translator
 
 def detect_language(text):
     try:
@@ -21,14 +21,27 @@ def detect_language(text):
     except LangDetectException:
         return None
 
-def translate_google(text, target_lang='en'):
+def translate_google(text, target_lang='ceb'):
     translator = GoogleTranslator(source='auto', target=target_lang)
     try:
         translated = translator.translate(text)
         return translated
     except Exception as e:
-        logging.error(f"Error during translation using deep_translator: {e}")
-        return text
+        logging.error(f"Error during translation using deep_translator for text '{text[:50]}...': {e}")
+        return text  # Return original text on error - CORRECTED
+
+def split_to_sentences(text):
+    try:
+        tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+        return tokenizer.tokenize(text)
+    except LookupError:
+        nltk.download('punkt')
+        tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+        return tokenizer.tokenize(text)
+    except Exception as e:
+        logging.error(f"Error loading sentence tokenizer: {e}")
+        # Fallback to simple split if nltk fails
+        return text.split('.')
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -130,7 +143,7 @@ def fetch_knowledge_guides():
 
 
 def search_knowledge_guides(user_question, language=None):
-    guides = fetch_knowledge_guides()  # Fetch guides
+    guides = fetch_knowledge_guides()
     if not guides:
         logging.warning("No knowledge guides available to search.")
         return None
@@ -138,13 +151,12 @@ def search_knowledge_guides(user_question, language=None):
     best_match_title_score = 0.8
     relevant_guide_by_title = None
 
-    # First, try to find a good match in the titles
     for guide in guides:
         title = guide.get("title")
         if title and difflib.SequenceMatcher(None, user_question.lower(), title.lower()).ratio() > best_match_title_score:
             logging.info(f"Found title match in Guide: {guide['id']} - Title: {title}")
             relevant_guide_by_title = guide
-            break  # Found a good title match
+            break
 
     if relevant_guide_by_title:
         guide_type = relevant_guide_by_title.get("type", "").lower()
@@ -153,34 +165,27 @@ def search_knowledge_guides(user_question, language=None):
         guide_language = relevant_guide_by_title.get("language")
         translated_text = relevant_guide_by_title.get("translatedText")
 
-        summary = ""
         if language == 'ceb' and translated_text:
-            sentences = translated_text.split('.')
-            summary = '. '.join(sentences[:2]).strip()
-            return summary
+            summary = '. '.join(translated_text.split('.')[:2]).strip()
+            return {"text": summary, "id": relevant_guide_by_title.get("id")}
         elif guide_type == "stepbystep" and steps and steps[0].get("description"):
-            sentences = steps[0]["description"].split('.')
-            summary = '. '.join(sentences[:2]).strip()
-            return summary
+            summary = '. '.join(steps[0]["description"].split('.')[:2]).strip()
+            return {"text": summary, "id": relevant_guide_by_title.get("id")}
         elif guide_type == "pdf" and extracted_text:
-            sentences = extracted_text.split('.')
-            summary = '. '.join(sentences[:2]).strip()[:1000]
-            return summary
+            summary = '. '.join(extracted_text.split('.')[:2]).strip()[:1000]
+            return {"text": summary, "id": relevant_guide_by_title.get("id")}
         elif relevant_guide_by_title.get("title"):
-            return relevant_guide_by_title["title"]
+            return {"text": relevant_guide_by_title["title"], "id": relevant_guide_by_title.get("id")}
         else:
             logging.warning(f"Title match found, but no relevant text content.")
             return None
 
-    # If no good title match, fallback to content search
     best_match_content = None
     best_match_score = 0.7
     best_match_guide = None
 
     for guide in guides:
         extracted_text = guide.get("extractedText")
-        guide_language = guide.get("language")
-        translated_text = guide.get("translatedText")
         if extracted_text:
             lines = [line.strip() for line in extracted_text.split("\n") if line.strip()]
             matches = difflib.get_close_matches(user_question, lines, n=1, cutoff=best_match_score)
@@ -190,15 +195,15 @@ def search_knowledge_guides(user_question, language=None):
                 best_match_content = matches[0]
                 break
 
-    if best_match_content:
+    if best_match_content and best_match_guide:
         guide_language = best_match_guide.get("language")
         translated_text = best_match_guide.get("translatedText")
         if language == 'ceb' and translated_text:
-            sentences = translated_text.split('.')
-            return '. '.join(sentences[:2]).strip()[:1000]
+            summary = '. '.join(translated_text.split('.')[:2]).strip()[:1000]
+            return {"text": summary, "id": best_match_guide.get("id")}
         else:
-            sentences = best_match_content.split('.')
-            return '. '.join(sentences[:2]).strip()[:1000]
+            summary = '. '.join(best_match_content.split('.')[:2]).strip()[:1000]
+            return {"text": summary, "id": best_match_guide.get("id")}
 
     logging.info(f"No sufficiently close match found in knowledge guides (title or content).")
     return None
@@ -228,8 +233,21 @@ def translate_guide(guide_id):
 
             if language == 'en' and extracted_text:
                 logging.info(f"Translating extractedText for guide ID: {guide_id}")
-                translated_text = translate_google(extracted_text, target_lang='ceb')
-                guide_ref.update({"translatedText": translated_text})
+
+                sentences = split_to_sentences(extracted_text)
+                translated_sentences = []
+                for sentence in sentences:
+                    cleaned_sentence = sentence.strip()
+                    if len(cleaned_sentence) > 0:
+                        try:
+                            translated_sentence = translate_google(cleaned_sentence, target_lang='ceb')
+                            translated_sentences.append(translated_sentence)
+                        except Exception as e:
+                            logging.error(f"Error translating sentence '{cleaned_sentence}': {e}")
+                            translated_sentences.append(cleaned_sentence) # Keep original if translation fails
+
+                translated_text = ". ".join(translated_sentences).strip()
+                guide_ref.update({"translatedText": translated_text}) # Dinhi gi-update ang Firebase
                 return jsonify({"message": f"Translation initiated for guide ID: {guide_id}"}), 200
             else:
                 return jsonify({"message": f"No English extractedText found for guide ID: {guide_id}, or already translated."}), 200
@@ -254,56 +272,49 @@ def chat():
 
         logging.info(f"Received message: {user_message}")
 
-        # Detect the language using gtranslate
         user_language = detect_language(user_message)
         logging.info(f"Detected user language: {user_language}")
 
-        is_land_bisaya_keyword = is_land_related_bisaya(user_message)
-        is_land_english_keyword = is_land_related_english(user_message)
+        is_land_bisaya = is_land_related_bisaya(user_message)
+        is_land_english = is_land_related_english(user_message)
 
-        if is_land_bisaya_keyword:
+        is_land_related = is_land_bisaya or is_land_english
+
+        if not is_land_related:
+            logging.info("User message does not contain land-related keywords.")
+            return jsonify({"text": "Sorry, I can only answer questions related to land and property."}), 200  # Or a more specific non-land response
+
+        if is_land_bisaya:
             user_language = 'ceb'
             logging.info("Heuristic: Bisaya land-related keyword found, assuming Bisaya.")
-        elif is_land_english_keyword:
+        elif is_land_english:
             user_language = 'en'
             logging.info("Heuristic: English land-related keyword found, assuming English.")
 
-        # Handle translating guides based on extracted text
-        if is_land_bisaya_keyword or is_land_english_keyword:
-            logging.info("User message contains land-related keywords. Searching knowledge guides...")
+        logging.info("User message contains land-related keywords. Searching knowledge guides...")
 
-            knowledge_guide_response = search_knowledge_guides(user_message, language=user_language)
+        knowledge_guide_response = search_knowledge_guides(user_message, language=user_language)
 
-            # If relevant guide found, check if translation is needed
-            if knowledge_guide_response:
-                # If guide has extracted text but no translated text, handle translation
-                guide_id = knowledge_guide_response.get("id")
-                guide_ref = db.collection("knowledge_guide").document(guide_id)
-                guide_doc = guide_ref.get()
+        if knowledge_guide_response and isinstance(knowledge_guide_response, dict):
+            guide_id = knowledge_guide_response.get("id")
+            guide_ref = db.collection("knowledge_guide").document(guide_id)
+            guide_doc = guide_ref.get()
 
-                if guide_doc.exists:
-                    guide_data = guide_doc.to_dict()
-                    extracted_text = guide_data.get("extractedText")
-                    if extracted_text and not guide_data.get("translatedText"):
-                        translated_text = translate_google(extracted_text, target_lang='ceb')
-                        guide_ref.update({"translatedText": translated_text})
+            if guide_doc.exists:
+                guide_data = guide_doc.to_dict()
+                extracted_text = guide_data.get("extractedText")
+                if extracted_text and not guide_data.get("translatedText"):
+                    translated_text = translate_google(extracted_text, target_lang='ceb')
+                    guide_ref.update({"translatedText": translated_text})
+                    logging.info(f"Guide {guide_id} translated and updated with new text.")
+                    return jsonify({"text": translated_text})
 
-                        logging.info(f"Guide {guide_id} translated and updated with new text.")
-                        return jsonify({"text": translated_text})
+            return jsonify({"text": knowledge_guide_response.get("text")})
 
-                return jsonify({"text": knowledge_guide_response})
-
-            else:
-                logging.info("No relevant content found in knowledge guides. Getting OpenAI response.")
-                openai_response = get_openai_response(user_message)
-                if user_language == 'ceb':
-                    translated_response = translate_google(openai_response, target_lang='ceb')
-                    return jsonify({"text": translated_response})
-                else:
-                    return jsonify({"text": openai_response})
-
+        elif knowledge_guide_response:
+            return jsonify({"text": knowledge_guide_response})
         else:
-            # If not land-related, proceed with OpenAI response
+            logging.info("No relevant content found in knowledge guides. Getting OpenAI response.")
             openai_response = get_openai_response(user_message)
             if user_language == 'ceb':
                 translated_response = translate_google(openai_response, target_lang='ceb')
@@ -314,7 +325,6 @@ def chat():
     except Exception as e:
         logging.error(f"Error processing chat request: {e}", exc_info=True)
         return jsonify({"text": "Sorry, an error occurred while processing your request."}), 500
-
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)
