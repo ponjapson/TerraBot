@@ -1,4 +1,3 @@
-import firebase_admin
 import os
 import logging
 import requests
@@ -42,8 +41,7 @@ if not FIREBASE_CRED_JSON:
 else:
     try:
         cred_dict = json.loads(FIREBASE_CRED_JSON)
-        cred = credentials.Certificate('firebase_creds.json')
-        firebase_admin.initialize_app(cred)
+        cred = credentials.Certificate(cred_dict)
         if not _apps:
             initialize_app(cred)
             logging.info("Firebase Initialized Successfully.")
@@ -216,4 +214,4 @@ def chat():
         logging.error(f"Error processing chat request: {e}")
         return jsonify({"text": "Sorry, an error occurred."}), 500
 
-handler = app
+app = app
