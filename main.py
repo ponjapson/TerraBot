@@ -1,216 +1,320 @@
-import random
+import firebase_admin
+from firebase_admin import credentials, firestore, initialize_app
+import os
+import logging
+import requests
+import difflib
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import json
-import logging
-import difflib
 import PyPDF2
-import requests
+import io
 from dotenv import load_dotenv
-import os
-import firebase_admin
-from firebase_admin import credentials, firestore
-from openai import OpenAI
-from http.server import BaseHTTPRequestHandler
+import openai
+from langdetect import detect, LangDetectException
+from googletrans import Translator
+from land_keywords import is_land_related_english, is_land_related_bisaya
+from deep_translator import GoogleTranslator  # Import deep_translator
+
+def detect_language(text):
+    try:
+        return detect(text)
+    except LangDetectException:
+        return None
+
+def translate_google(text, target_lang='en'):
+    translator = GoogleTranslator(source='auto', target=target_lang)
+    try:
+        translated = translator.translate(text)
+        return translated
+    except Exception as e:
+        logging.error(f"Error during translation using deep_translator: {e}")
+        return text
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-client = OpenAI(
-    api_key=os.environ["OPENAI_API_KEY"]
-)
+# Load environment variables from .env file
+load_dotenv()
 
-# Hardcoded Firebase Admin credentials
-firebase_cred_json = os.environ.get("FIREBASE_CRED_JSON")
-if firebase_cred_json:
-    cred = credentials.Certificate(json.loads(firebase_cred_json))
-    firebase_admin.initialize_app(cred)
-    db = firestore.client()
-else:
-    raise Exception("Firebase credentials not found.")
+# Initialize OpenAI client
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise ValueError("OPENAI_API_KEY environment variable not set.")
+openai.api_key = api_key
+client = openai
+logging.info("OpenAI client initialized.")
 
-# Load dataset function
-def load_data():
-    try:
-        with open("datasets/trmhdataset.jsonl", "r", encoding="utf-8") as file:
-            return [json.loads(line) for line in file]
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        logging.error(f"Error loading dataset: {e}")
-        return []
+# Initialize Firebase Admin
+firebase_cred_path = os.getenv('FIREBASE_CRED_JSON')
+if not firebase_cred_path:
+    raise ValueError("FIREBASE_CRED_JSON environment variable not set.")
+if not os.path.exists(firebase_cred_path):
+    raise FileNotFoundError(f"Firebase credential file not found at path: {firebase_cred_path}")
+if not firebase_admin._apps:
+    cred = credentials.Certificate(firebase_cred_path)
+    initialize_app(cred)
+    logging.info("Firebase Initialized Successfully.")
+db = firestore.client()
 
-# Find best dataset match
-def find_best_match(user_input, dataset):
-    user_messages = [conv["messages"][-2]["content"] for conv in dataset if len(conv["messages"]) >= 2]
-    closest_match = difflib.get_close_matches(user_input, user_messages, n=1, cutoff=0.7)
-    
-    if closest_match:
-        for conv in dataset:
-            if conv["messages"][-2]["content"] == closest_match[0]:
-                return conv["messages"][-1]["content"]
-    return None
-
-# Extract text from a PDF URL
+# --- PDF Extraction Functions ---
 def extract_text_from_pdf_url(pdf_url):
     text = ""
     try:
-        response = requests.get(pdf_url)
-        if response.status_code == 200:
-            with open("temp.pdf", "wb") as file:
-                file.write(response.content)
-            
-            with open("temp.pdf", "rb") as file:
-                reader = PyPDF2.PdfReader(file)
-                for page in reader.pages:
-                    extracted_text = page.extract_text()
-                    if extracted_text:
-                        text += extracted_text + "\n"
-    except Exception as e:
-        logging.error(f"Error extracting text from PDF URL {pdf_url}: {e}")
-    return text.strip()
+        response = requests.get(pdf_url, timeout=30)
+        response.raise_for_status()
 
-# Get all PDF texts from Firebase Firestore
-def fetch_pdfs_from_firebase():
-    pdf_texts = []
+        pdf_buffer = io.BytesIO(response.content)
+        reader = PyPDF2.PdfReader(pdf_buffer)
+        for page in reader.pages:
+            extracted_text = page.extract_text()
+            if extracted_text:
+                text += extracted_text + "\n"
+
+        logging.info(f"Successfully extracted text from {pdf_url}")
+        return text.strip()
+
+    except requests.exceptions.Timeout:
+        logging.error(f"Timeout error downloading PDF from URL {pdf_url}")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error downloading PDF from URL {pdf_url}: {e}")
+    except PyPDF2.errors.PdfReadError as e:
+        logging.error(f"Error reading PDF content from {pdf_url}. It might be corrupted or password-protected: {e}")
+    except Exception as e:
+        logging.error(f"Unexpected error extracting text from PDF URL {pdf_url}: {e}", exc_info=True)
+
+    return ""
+
+
+def fetch_knowledge_guides():
+    guides = []
+    logging.info("Fetching knowledge guides from Firebase 'knowledge_guide' collection...")
     try:
-        pdf_docs = db.collection("pdfs").stream()
-        for doc in pdf_docs:
-            pdf_url = doc.to_dict().get("url")
-            if pdf_url:
-                text = extract_text_from_pdf_url(pdf_url)
-                if text:
-                    pdf_texts.append({"filename": doc.id, "content": text})
-    except Exception as e:
-        logging.error(f"Error fetching PDFs from Firebase: {e}")
-    return pdf_texts
+        guide_docs = db.collection("knowledge_guide").stream()
+        count = 0
+        for doc in guide_docs:
+            count += 1
+            guide_data = doc.to_dict()
+            guide_id = doc.id
+            content = guide_data.get("content")
+            pdf_url = guide_data.get("pdfUrl")
+            title = guide_data.get("title")  # Fetch the title
+            guide_type = guide_data.get("guideType")
+            extracted_text = guide_data.get("extractedText") # Fetch pre-extracted text if available
+            steps = guide_data.get("steps") # Fetch steps if available
+            language = guide_data.get("language") # Fetch language if available
+            translated_text = guide_data.get("translatedText") # Fetch translated text if available
 
-# Search PDFs for relevant text
-def search_pdfs(user_question):
-    pdf_data = fetch_pdfs_from_firebase()
-    for pdf in pdf_data:
-        matches = difflib.get_close_matches(user_question, pdf["content"].split("\n"), n=1, cutoff=0.6)
-        if matches:
-            return matches[0][:500]
+            logging.info(f"Fetched document ID: {guide_id}, Type: {guide_type}, Language: {language}, Translated: {translated_text is not None}") # Log translation status
+
+            if content or pdf_url or title or extracted_text or steps:
+                guides.append({
+                    "id": guide_id,
+                    "content": content,
+                    "pdfUrl": pdf_url,
+                    "title": title,
+                    "type": guide_type,
+                    "extractedText": extracted_text,
+                    "steps": steps,
+                    "language": language,
+                    "translatedText": translated_text
+                })
+
+        logging.info(f"Finished processing {count} knowledge guides from 'knowledge_guide'.")
+    except Exception as e:
+        logging.error(f"Error fetching/processing guides from 'knowledge_guide': {e}", exc_info=True)
+    return guides
+
+
+def search_knowledge_guides(user_question, language=None):
+    guides = fetch_knowledge_guides()  # Fetch guides
+    if not guides:
+        logging.warning("No knowledge guides available to search.")
+        return None
+
+    best_match_title_score = 0.8
+    relevant_guide_by_title = None
+
+    # First, try to find a good match in the titles
+    for guide in guides:
+        title = guide.get("title")
+        if title and difflib.SequenceMatcher(None, user_question.lower(), title.lower()).ratio() > best_match_title_score:
+            logging.info(f"Found title match in Guide: {guide['id']} - Title: {title}")
+            relevant_guide_by_title = guide
+            break  # Found a good title match
+
+    if relevant_guide_by_title:
+        guide_type = relevant_guide_by_title.get("type", "").lower()
+        steps = relevant_guide_by_title.get("steps", [])
+        extracted_text = relevant_guide_by_title.get("extractedText", "")
+        guide_language = relevant_guide_by_title.get("language")
+        translated_text = relevant_guide_by_title.get("translatedText")
+
+        summary = ""
+        if language == 'ceb' and translated_text:
+            sentences = translated_text.split('.')
+            summary = '. '.join(sentences[:2]).strip()
+            return summary
+        elif guide_type == "stepbystep" and steps and steps[0].get("description"):
+            sentences = steps[0]["description"].split('.')
+            summary = '. '.join(sentences[:2]).strip()
+            return summary
+        elif guide_type == "pdf" and extracted_text:
+            sentences = extracted_text.split('.')
+            summary = '. '.join(sentences[:2]).strip()[:1000]
+            return summary
+        elif relevant_guide_by_title.get("title"):
+            return relevant_guide_by_title["title"]
+        else:
+            logging.warning(f"Title match found, but no relevant text content.")
+            return None
+
+    # If no good title match, fallback to content search
+    best_match_content = None
+    best_match_score = 0.7
+    best_match_guide = None
+
+    for guide in guides:
+        extracted_text = guide.get("extractedText")
+        guide_language = guide.get("language")
+        translated_text = guide.get("translatedText")
+        if extracted_text:
+            lines = [line.strip() for line in extracted_text.split("\n") if line.strip()]
+            matches = difflib.get_close_matches(user_question, lines, n=1, cutoff=best_match_score)
+            if matches:
+                logging.info(f"Found content match in Guide: {guide['id']} - {matches[0][:200]}...")
+                best_match_guide = guide
+                best_match_content = matches[0]
+                break
+
+    if best_match_content:
+        guide_language = best_match_guide.get("language")
+        translated_text = best_match_guide.get("translatedText")
+        if language == 'ceb' and translated_text:
+            sentences = translated_text.split('.')
+            return '. '.join(sentences[:2]).strip()[:1000]
+        else:
+            sentences = best_match_content.split('.')
+            return '. '.join(sentences[:2]).strip()[:1000]
+
+    logging.info(f"No sufficiently close match found in knowledge guides (title or content).")
     return None
 
-# Fetch response from OpenAI
+# --- OpenAI Response ---
 def get_openai_response(user_message):
     try:
-        # Get the response from OpenAI
         response = client.chat.completions.create(
-            model="ft:gpt-4o-mini-2024-07-18:trmh::BM9AR4FW",
-            messages=[{"role": "user", "content": user_message}]
+            model="gpt-4o-mini-2024-07-18",
+            messages=[{"role": "user", "content": user_message}],
+            max_tokens=300
         )
-        
-        # Access the content of the response and return it
-        return response.choices[0].message.content.strip()
-    
+        return response.choices[0].message.content
     except Exception as e:
-        logging.error(f"OpenAI API Error: {e}", exc_info=True)  # Logs the error with traceback
-        return "Sorry, I'm experiencing issues connecting to OpenAI."
+        logging.error(f"OpenAI API Error: {e}", exc_info=True)
+        return "Sorry, I encountered an error while processing your request."
 
-# LAND KEYWORDS
-LAND_KEYWORDS = [
-    "land", "surveyor", "processor", "survey", "territory", "boundary", "ownership", "property", "real estate", "accessor", 
-    "deed of sale", "Title Deed", "zoning", "processing", "parcel", "lot", "terrain", "geodetic", "land title transfer", 
-    "topography", "coordinates", "GIS", "easement", "tenure", "leasehold", "freehold",  
-    "subdivision", "appraisal", "mortgage", "escrow", "cadastral", "geospatial", "dispute", 
-    "land use", "notary", "affidavit", "forestry", "conservation",  
-    "survey marker", "land grant", "land registry", "demarcation", "surveying instruments",  
-    "mapping", "cartography", "site development", "land reclamation", "environmental impact",  
-    "hydrography", "title insurance", "heritage land",  
-    "right of way", "geological survey", "land tenure system", "land valuation",  
-    "site planning", "land tenure security", "property assessment", "legal description",  
-    "land act", "urban planning", "rural land", "municipal planning", "land ownership transfer",  
-    "taxation of land", "land development", "land acquisition", "land leasing", "survey regulations",
-    "electronic certificate authorizing registration", "deed of donation", "deed of adjudication", "real property tax ",
-    "capital gains tax", "documentary stamp tax", "transfer tax", "estate tax", "special assessment tax", "zonal valuation"
-]
+@app.route("/admin/translate_guide/<guide_id>", methods=["POST"])
+def translate_guide(guide_id):
+    try:
+        guide_ref = db.collection("knowledge_guide").document(guide_id)
+        guide_doc = guide_ref.get()
+        if guide_doc.exists:
+            guide_data = guide_doc.to_dict()
+            extracted_text = guide_data.get("extractedText")
+            language = guide_data.get("language")
 
-def is_land_related(message):
-    message_lower = message.lower()
-    return any(word in message_lower for word in LAND_KEYWORDS)
+            if language == 'en' and extracted_text:
+                logging.info(f"Translating extractedText for guide ID: {guide_id}")
+                translated_text = translate_google(extracted_text, target_lang='ceb')
+                guide_ref.update({"translatedText": translated_text})
+                return jsonify({"message": f"Translation initiated for guide ID: {guide_id}"}), 200
+            else:
+                return jsonify({"message": f"No English extractedText found for guide ID: {guide_id}, or already translated."}), 200
+        else:
+            return jsonify({"error": f"Guide with ID {guide_id} not found."}), 404
+    except Exception as e:
+        logging.error(f"Error translating guide {guide_id}: {e}")
+        return jsonify({"error": f"Error translating guide {guide_id}: {str(e)}"}), 500
 
-# Chat route
 @app.route("/chat", methods=["POST"])
 def chat():
     try:
         user_data = request.get_json()
+        if not user_data or "message" not in user_data:
+            logging.warning("Received invalid request data.")
+            return jsonify({"text": "Error: Invalid request data. 'message' field is required."}), 400
+
         user_message = user_data.get("message", "").strip()
 
         if not user_message:
-            return jsonify({"text": "Error: Message cannot be empty."}), 400
-        
-        greeting_keywords = ["hello", "hi", "hey", "good morning", "good evening", "howdy"]
-        if any(greeting in user_message.lower() for greeting in greeting_keywords):
-            return jsonify({"text": "Hello, I'm TerraBot. How can I assist you today?"})
-        
-        appreciation_keywords = ["thank you", "thanks", "much appreciated", "grateful", "thankful", "cheers"]
-        appreciation_responses = [
-                                 "You're welcome!",
-                                 "Happy to help!",
-                                 "Anytime!",
-                                 "Glad I could assist you.",
-                                 "You're most welcome!",
-                                 "No problem at all!"
-                                 ]
-        
-        if any(phrase in user_message.lower() for phrase in appreciation_keywords):
-            return jsonify({"text": random.choice(appreciation_responses)})
+            return jsonify({"text": "Error: No message provided."}), 400
 
-        closing_keywords = ["goodbye", "see you later", "bye", "cyl"]
-        if any(phrase in user_message.lower() for phrase in closing_keywords):
-            closing_responses = [
-                                 "Goodbye! Have a great day!",
-                                 "See you later! Reach out if you need land help.",
-                                 "Take care! Let me know if you have more land-related questions.",
-                                 "Bye! I'm here whenever you need land info.",
-                                 "You're most welcome!",
-                                 "Farewell! Happy to assist anytime"
-                                 ]
-            
-            return jsonify({"text": random.choice(closing_responses)})
-        
-        incorrect_keywords = ["wrong", "incorrect", "mistake", "not right", "error", "that's wrong", "that's not correct"]
-        if any(incorrect in user_message.lower() for incorrect in incorrect_keywords):
-             apology_responses = [
-                                "I apologize for the mistake. Let me correct that for you.",
-                                "Sorry about that! Let me try again.",
-                                "My apologies for the error! How can I help you further?",
-                                "Oops! I made a mistake. Please allow me to fix it.",
-                                "Sorry for the confusion! I'll do my best to correct it.",
-                                "I’m sorry, I didn’t get that right. Let me assist you properly."
-]
-             return jsonify({"text": random.choice(apology_responses)})
+        logging.info(f"Received message: {user_message}")
 
-        # First, check if the message is related to land
-        if not is_land_related(user_message):
-            return jsonify({"text": "Sorry, this question is not related to land or property. I can only help with land-related queries."}), 403
+        # Detect the language using gtranslate
+        user_language = detect_language(user_message)
+        logging.info(f"Detected user language: {user_language}")
 
-        # If land-related, check Dataset First
-        dataset = load_data()
-        response = find_best_match(user_message, dataset)
+        is_land_bisaya_keyword = is_land_related_bisaya(user_message)
+        is_land_english_keyword = is_land_related_english(user_message)
 
-        # If No Dataset Answer, Search PDFs
-        if response is None:
-            response = search_pdfs(user_message)
+        if is_land_bisaya_keyword:
+            user_language = 'ceb'
+            logging.info("Heuristic: Bisaya land-related keyword found, assuming Bisaya.")
+        elif is_land_english_keyword:
+            user_language = 'en'
+            logging.info("Heuristic: English land-related keyword found, assuming English.")
 
-        # If No PDF Match, Use OpenAI
-        if response is None:
-            response = get_openai_response(user_message)
+        # Handle translating guides based on extracted text
+        if is_land_bisaya_keyword or is_land_english_keyword:
+            logging.info("User message contains land-related keywords. Searching knowledge guides...")
 
-        return jsonify({"text": response})
+            knowledge_guide_response = search_knowledge_guides(user_message, language=user_language)
+
+            # If relevant guide found, check if translation is needed
+            if knowledge_guide_response:
+                # If guide has extracted text but no translated text, handle translation
+                guide_id = knowledge_guide_response.get("id")
+                guide_ref = db.collection("knowledge_guide").document(guide_id)
+                guide_doc = guide_ref.get()
+
+                if guide_doc.exists:
+                    guide_data = guide_doc.to_dict()
+                    extracted_text = guide_data.get("extractedText")
+                    if extracted_text and not guide_data.get("translatedText"):
+                        translated_text = translate_google(extracted_text, target_lang='ceb')
+                        guide_ref.update({"translatedText": translated_text})
+
+                        logging.info(f"Guide {guide_id} translated and updated with new text.")
+                        return jsonify({"text": translated_text})
+
+                return jsonify({"text": knowledge_guide_response})
+
+            else:
+                logging.info("No relevant content found in knowledge guides. Getting OpenAI response.")
+                openai_response = get_openai_response(user_message)
+                if user_language == 'ceb':
+                    translated_response = translate_google(openai_response, target_lang='ceb')
+                    return jsonify({"text": translated_response})
+                else:
+                    return jsonify({"text": openai_response})
+
+        else:
+            # If not land-related, proceed with OpenAI response
+            openai_response = get_openai_response(user_message)
+            if user_language == 'ceb':
+                translated_response = translate_google(openai_response, target_lang='ceb')
+                return jsonify({"text": translated_response})
+            else:
+                return jsonify({"text": openai_response})
 
     except Exception as e:
-        logging.error(f"Unexpected server error: {str(e)}", exc_info=True)
-        return jsonify({"text": "An unexpected error occurred."}), 500
-    
-# Lambda handler for AWS or other serverless deployments
-def handler(event, context):
-    return app(event, context)
+        logging.error(f"Error processing chat request: {e}", exc_info=True)
+        return jsonify({"text": "Sorry, an error occurred while processing your request."}), 500
+
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, host="0.0.0.0", port=5000)
