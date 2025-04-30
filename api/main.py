@@ -206,5 +206,4 @@ def chat():
         logging.error(f"Error processing chat request: {e}")
         return jsonify({"text": "Sorry, an error occurred."}), 500
 
-if __name__ == "__main__":
-    app.run(debug=True)
+handler = app
