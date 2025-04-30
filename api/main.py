@@ -12,8 +12,8 @@ import json
 from langdetect import detect, LangDetectException
 from deep_translator import GoogleTranslator
 from firebase_admin import credentials, firestore, initialize_app, _apps
-from api.land_keywords import is_land_related_english, is_land_related_bisaya
-from api.greetings import handle_greeting, handle_bisaya_greeting, handle_appreciation, handle_closing
+from land_keywords import is_land_related_english, is_land_related_bisaya
+from greetings import handle_greeting, handle_bisaya_greeting, handle_appreciation, handle_closing
 
 # Load environment variables
 load_dotenv()
