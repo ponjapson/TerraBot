@@ -8,6 +8,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import PyPDF2
 import openai
+import json
 from langdetect import detect, LangDetectException
 from deep_translator import GoogleTranslator
 from firebase_admin import credentials, firestore, initialize_app, _apps
@@ -17,7 +18,7 @@ from greetings import handle_greeting, handle_bisaya_greeting, handle_appreciati
 # Load environment variables
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-FIREBASE_CRED_PATH = os.getenv('FIREBASE_CRED_JSON')
+FIREBASE_CRED_JSON = os.getenv('FIREBASE_CRED_JSON')
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,15 +35,22 @@ client = openai
 logging.info("OpenAI client initialized.")
 
 # Initialize Firebase Admin
-if not FIREBASE_CRED_PATH:
-    raise ValueError("FIREBASE_CRED_JSON environment variable not set.")
-if not os.path.exists(FIREBASE_CRED_PATH):
-    raise FileNotFoundError(f"Firebase credential file not found at path: {FIREBASE_CRED_PATH}")
-if not _apps:
-    cred = credentials.Certificate(FIREBASE_CRED_PATH)
-    initialize_app(cred)
-    logging.info("Firebase Initialized Successfully.")
-db = firestore.client()
+if not FIREBASE_CRED_JSON:
+    logging.error("FIREBASE_CRED_JSON environment variable not set.")
+    # Decide how to handle this critical error, perhaps raise an exception
+else:
+    try:
+        cred_dict = json.loads(FIREBASE_CRED_JSON)
+        cred = credentials.Certificate(cred_dict)
+        if not _apps:
+            initialize_app(cred)
+            logging.info("Firebase Initialized Successfully.")
+        db = firestore.client()
+    except json.JSONDecodeError as e:
+        logging.error(f"Error decoding FIREBASE_CRED_JSON: {e}")
+    except Exception as e:
+        logging.error(f"Error initializing Firebase Admin SDK: {e}")
+        db = None # Ensure db is None if initialization fails
 
 # --- Helper Functions ---
 def detect_language(text):
