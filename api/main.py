@@ -1,3 +1,4 @@
+import firebase_admin
 import os
 import logging
 import requests
@@ -41,7 +42,8 @@ if not FIREBASE_CRED_JSON:
 else:
     try:
         cred_dict = json.loads(FIREBASE_CRED_JSON)
-        cred = credentials.Certificate(cred_dict)
+        cred = credentials.Certificate('firebase_creds.json')
+        firebase_admin.initialize_app(cred)
         if not _apps:
             initialize_app(cred)
             logging.info("Firebase Initialized Successfully.")
